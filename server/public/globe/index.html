@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>지구여행 지구본</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+    #globe { position: absolute; inset: 0; }
+    #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      color: #9aa3c0; font: 14px -apple-system, system-ui, sans-serif; pointer-events: none; }
+    .tip { background: rgba(11,16,32,.85); color: #fff; padding: 6px 10px; border-radius: 8px;
+      font: 13px -apple-system, system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="globe"></div>
+  <div id="loading">지구를 불러오는 중…</div>
+  <script src="./globe.gl.min.js"></script>
+  <script>
+  (function () {
+    // ---- 앱 <-> 지구본 메시지 브릿지 (React Native WebView 또는 웹 iframe) ----
+    function send(msg) {
+      var data = JSON.stringify(msg);
+      if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(data);
+      else if (window.parent !== window) window.parent.postMessage(data, '*');
+    }
+
+    var visits = {};        // { KR: 2, JP: 5 }
+    var colors = {};        // 방문 횟수 -> 색상 (앱에서 전달)
+    var selected = null;    // 선택된 나라 코드
+    var hovered = null;
+    var features = [];
+
+    function hexToRgba(hex, a) {
+      var n = parseInt(hex.slice(1), 16);
+      return 'rgba(' + (n >> 16 & 255) + ',' + (n >> 8 & 255) + ',' + (n & 255) + ',' + a + ')';
+    }
+    function capColor(f) {
+      var code = f.properties.code;
+      var c = colors[code];
+      if (code === selected) return c ? hexToRgba(c, 0.95) : 'rgba(79,140,255,0.75)';
+      if (c) return hexToRgba(c, code === hovered ? 0.95 : 0.72);
+      return code === hovered ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.01)';
+    }
+    function altitude(f) {
+      var code = f.properties.code;
+      if (code === selected) return 0.04;
+      if (visits[code]) return 0.012 + Math.min(visits[code], 10) * 0.002;
+      return 0.006;
+    }
+
+    var el = document.getElementById('globe');
+    var globe = new Globe(el, { animateIn: true })
+      .globeImageUrl('./earth-blue-marble.jpg')
+      .bumpImageUrl('./earth-topology.png')
+      .backgroundImageUrl('./night-sky.png')
+      .showAtmosphere(true)
+      .atmosphereColor('#7fb8ff')
+      .atmosphereAltitude(0.18)
+      .polygonCapColor(capColor)
+      .polygonSideColor(function () { return 'rgba(0,0,0,0.25)'; })
+      .polygonStrokeColor(function (f) { return colors[f.properties.code] ? '#ffffff88' : '#ffffff30'; })
+      .polygonAltitude(altitude)
+      .polygonsTransitionDuration(300)
+      .polygonLabel(function (f) {
+        var n = visits[f.properties.code];
+        return '<div class="tip"><b>' + f.properties.nameKo + '</b>' + (n ? ' · ' + n + '회 방문' : '') + '</div>';
+      })
+      .onPolygonHover(function (f) {
+        hovered = f ? f.properties.code : null;
+        el.style.cursor = f ? 'pointer' : 'grab';
+        refresh();
+      })
+      .onPolygonClick(function (f, _ev, coords) {
+        select(f.properties.code, coords);
+        send({ type: 'select', code: f.properties.code, name: f.properties.name, nameKo: f.properties.nameKo });
+      })
+      .onGlobeClick(function () {
+        selected = null;
+        refresh();
+        send({ type: 'deselect' });
+      });
+
+    var controls = globe.controls();
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.35;
+    controls.enableDamping = true;
+    el.addEventListener('pointerdown', function () { controls.autoRotate = false; });
+
+    // 세로로 긴 휴대폰 화면에서는 조금 더 멀리서 시작
+    globe.pointOfView({ lat: 30, lng: 127, altitude: window.innerWidth < window.innerHeight ? 3.2 : 2.3 });
+
+    function refresh() {
+      // 접근자 함수를 다시 지정해 색/높이를 갱신
+      globe.polygonCapColor(capColor).polygonAltitude(altitude);
+    }
+
+    function bboxCenter(f) {
+      var minX = 180, maxX = -180, minY = 90, maxY = -90, ring;
+      var polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+      // 가장 큰 폴리곤(외곽 링 점 수 기준)의 중심으로 이동
+      var biggest = polys.reduce(function (a, b) { return b[0].length > a[0].length ? b : a; });
+      ring = biggest[0];
+      for (var i = 0; i < ring.length; i++) {
+        minX = Math.min(minX, ring[i][0]); maxX = Math.max(maxX, ring[i][0]);
+        minY = Math.min(minY, ring[i][1]); maxY = Math.max(maxY, ring[i][1]);
+      }
+      var span = Math.max(maxX - minX, maxY - minY);
+      return { lat: (minY + maxY) / 2, lng: (minX + maxX) / 2, altitude: Math.min(2.2, Math.max(0.9, span / 20)) };
+    }
+
+    function select(code, coords) {
+      selected = code;
+      controls.autoRotate = false;
+      var f = features.find(function (x) { return x.properties.code === code; });
+      var pov = f ? bboxCenter(f) : { lat: coords.lat, lng: coords.lng, altitude: 1.4 };
+      globe.pointOfView(pov, 900);
+      refresh();
+    }
+
+    function onMessage(e) {
+      var msg;
+      try { msg = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (_) { return; }
+      if (!msg || !msg.type) return;
+      if (msg.type === 'visits') {
+        visits = msg.visits || {};
+        colors = msg.colors || {};
+        refresh();
+      } else if (msg.type === 'select') {
+        select(msg.code, { lat: 0, lng: 0 });
+      } else if (msg.type === 'deselect') {
+        selected = null;
+        refresh();
+      }
+    }
+    window.addEventListener('message', onMessage);
+    document.addEventListener('message', onMessage); // Android WebView
+
+    function resize() { globe.width(window.innerWidth).height(window.innerHeight); }
+    window.addEventListener('resize', resize);
+    resize();
+
+    fetch('../geo/countries')
+      .then(function (r) { return r.json(); })
+      .then(function (fc) {
+        features = fc.features;
+        globe.polygonsData(features);
+        document.getElementById('loading').remove();
+        send({ type: 'ready' });
+      })
+      .catch(function (err) { send({ type: 'error', message: String(err) }); });
+  })();
+  </script>
+</body>
+</html>
